@@ -1,3 +1,4 @@
 users.json
 users.sqlite*
 node_modules
+libsqlite_zstd.so
