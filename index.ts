@@ -47,11 +47,18 @@ if (!fs.existsSync("users.json")) {
 
 const db = new Database("users.sqlite");
 
+// Load sqlite-zstd extension
+console.log("Loading sqlite-zstd extension...");
+db.loadExtension("./libsqlite_zstd.so");
+
 db.exec("PRAGMA journal_mode = WAL");
+// Recommended settings for sqlite-zstd
+db.exec("PRAGMA busy_timeout = 2000");
+db.exec("PRAGMA auto_vacuum = FULL");
 
 // Drop table if exists to avoid conflicts
 db.exec("DROP TABLE IF EXISTS users");
-db.exec("CREATE TABLE users (userId TEXT, username TEXT, email TEXT, avatar TEXT, password TEXT, birthdate TEXT, registeredAt TEXT, extraDataJson TEXT)");
+db.exec("CREATE TABLE users (userId TEXT PRIMARY KEY, username TEXT, email TEXT, avatar TEXT, password TEXT, birthdate TEXT, registeredAt TEXT, extraDataJson TEXT)");
 
 console.log("Inserting users into database...");
 const stmt = db.prepare("INSERT INTO users (userId, username, email, avatar, password, birthdate, registeredAt, extraDataJson) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
@@ -64,37 +71,73 @@ const insertMany = db.transaction((users) => {
 
 insertMany(users);
 
-// Dump all users from the database
-console.log("Dumping all users from database...");
-const allUsers = db.prepare("SELECT * FROM users").all();
-console.log(`Total users in database: ${allUsers.length}`);
+// Get size before compression
+console.log("\n=== Size before compression ===");
+const beforeStats = fs.statSync("users.sqlite");
+const beforeSize = beforeStats.size;
+console.log(`SQLite file size before compression: ${beforeSize} bytes (${(beforeSize / 1024 / 1024).toFixed(2)} MB)`);
+
+// Enable transparent compression on extraDataJson column
+console.log("\nEnabling transparent compression on extraDataJson column...");
+db.exec(`SELECT zstd_enable_transparent('{"table": "users", "column": "extraDataJson", "compression_level": 19, "dict_chooser": "''a''"}')`);
+
+// Run incremental maintenance to compress existing data
+console.log("Running compression maintenance...");
+db.exec("SELECT zstd_incremental_maintenance(null, 1)");
 
 // Force WAL checkpoint to write all data to main database file
 console.log("Checkpointing WAL to ensure data is written to main file...");
 db.exec("PRAGMA wal_checkpoint(FULL)");
 
-// Run VACUUM
-console.log("Running VACUUM...");
+// Run VACUUM to reclaim space
+console.log("Running VACUUM to reclaim space...");
 db.exec("VACUUM");
 
-// Get JSON file size
+// Get size after compression
+console.log("\n=== Size after compression ===");
+const afterStats = fs.statSync("users.sqlite");
+const afterSize = afterStats.size;
+console.log(`SQLite file size after compression: ${afterSize} bytes (${(afterSize / 1024 / 1024).toFixed(2)} MB)`);
+
+// Test that data is still queryable
+console.log("\n=== Testing data accessibility ===");
+const allUsers = db.prepare("SELECT * FROM users").all();
+console.log(`Total users in database: ${allUsers.length}`);
+
+// Test a specific query
+const sampleUser = db.prepare("SELECT * FROM users LIMIT 1").get();
+console.log(`Sample user data (first user): ${sampleUser.username}, extraData length: ${sampleUser.extraDataJson.length} chars`);
+
+// Get compression statistics
+console.log("\n=== Compression statistics ===");
+const compressionStats = db.prepare("SELECT * FROM _zstd_configs").all();
+console.log("Compression configuration:", compressionStats);
+
+try {
+    const dictStats = db.prepare("SELECT id, length(dict) as dict_size FROM _zstd_dicts").all();
+    console.log("Dictionary info:", dictStats);
+} catch (e) {
+    console.log("Dictionary table structure may vary by sqlite-zstd version");
+}
+
+// Get JSON file size for comparison
+console.log("\n=== Overall size comparison ===");
 const jsonStats = fs.statSync("users.json");
 const jsonSize = jsonStats.size;
 console.log(`JSON file size: ${jsonSize} bytes (${(jsonSize / 1024 / 1024).toFixed(2)} MB)`);
+console.log(`SQLite uncompressed: ${beforeSize} bytes (${(beforeSize / 1024 / 1024).toFixed(2)} MB)`);
+console.log(`SQLite compressed: ${afterSize} bytes (${(afterSize / 1024 / 1024).toFixed(2)} MB)`);
 
-// Get SQLite file size after VACUUM
-const sqliteStats = fs.statSync("users.sqlite");
-const sqliteSize = sqliteStats.size;
-console.log(`SQLite file size after VACUUM: ${sqliteSize} bytes (${(sqliteSize / 1024 / 1024).toFixed(2)} MB)`);
+const compressionReduction = beforeSize - afterSize;
+const compressionPercent = ((compressionReduction / beforeSize) * 100).toFixed(2);
+console.log(`\nCompression savings: ${compressionReduction} bytes (${compressionPercent}% reduction)`);
 
-const reduction = jsonSize - sqliteSize;
-const reductionPercent = ((reduction / jsonSize) * 100).toFixed(2);
-console.log(`Size reduction vs JSON: ${reduction} bytes (${reductionPercent}%)`);
+const totalReduction = jsonSize - afterSize;
+const totalPercent = ((totalReduction / jsonSize) * 100).toFixed(2);
+console.log(`Total size reduction vs JSON: ${totalReduction} bytes (${totalPercent}% reduction)`);
 
 db.close();
 
-["users.sqlite", "users.sqlite-wal", "users.sqlite-shm"].forEach(file => {
-    if (fs.existsSync(file)) {
-        fs.unlinkSync(file);
-    }
-});
+// Clean up - keeping the compressed database for inspection
+console.log("\nDatabase file 'users.sqlite' has been kept for inspection.");
+console.log("The extraDataJson column is now transparently compressed with zstd.");
