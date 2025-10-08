@@ -4,7 +4,10 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "start": "npx tsx index.ts"
+    "start": "npx tsx index.ts",
+    "demo": "npx tsx demo-compressed-queries.ts",
+    "demo:write": "npx tsx demo-write-operations.ts",
+    "verify": "npx tsx verify-no-full-decompression.ts"
   },
   "dependencies": {
     "@faker-js/faker": "^9.9.0",
